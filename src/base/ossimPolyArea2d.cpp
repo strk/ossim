@@ -11,57 +11,26 @@
 #include <ossim/base/ossimNotify.h>
 #include <ossim/base/ossimRefPtr.h>
 #include <ossim/base/ossimString.h>
-#include <geos/geom/Coordinate.h>
-#include <geos/geom/CoordinateArraySequence.h>
-#include <geos/geom/GeometryFactory.h>
-#include <geos/geom/LinearRing.h>
-#include <geos/opBuffer.h>
-#include <geos/geom/Point.h>
-#include <geos/geom/Polygon.h>
-#include <geos/geom/MultiPolygon.h>
-#include <geos/geom/PrecisionModel.h>
-#include <geos/io/WKTReader.h>
-#include <geos/io/WKTWriter.h>
-#include <geos/util/GEOSException.h>
-#include <geos/operation/valid/IsValidOp.h>
-#include <geos/opBuffer.h>
+
+#include <geos_c.h>
 #include <cstdlib>
 #include <exception>
 #include <vector>
 
-class ossimGeometryFactoryWrapper : public ossimReferenced
-{
-public:
-   ossimGeometryFactoryWrapper()
-      : m_geomFactory(0)
-   {
-      geos::geom::PrecisionModel *pm =
-         new geos::geom::PrecisionModel(geos::geom::PrecisionModel::FLOATING);
-      m_geomFactory = new geos::geom::GeometryFactory(pm, -1); 
-   }
-   virtual ~ossimGeometryFactoryWrapper(){if(m_geomFactory) delete m_geomFactory;m_geomFactory=0;}
-   
-   geos::geom::GeometryFactory* m_geomFactory;
-};
-
 class OssimPolyArea2dPrivate
 {
 public:
-   typedef geos::geom::Geometry* GeometryPtr;
-   typedef const geos::geom::Geometry* ConstGeometryPtr;
+   typedef GEOSGeometry* GeometryPtr;
+   typedef const GEOSGeometry* ConstGeometryPtr;
    
    OssimPolyArea2dPrivate(GeometryPtr geom=0);
    ~OssimPolyArea2dPrivate();
    
-   void deleteGeometry() { if(m_geometry) { delete m_geometry; m_geometry = 0; }}
+   void deleteGeometry() { if(m_geometry) { GEOSGeom_destroy(m_geometry); m_geometry = 0; }}
    void setGeometry(const ossimPolygon& polygon, const vector<ossimPolygon>& holes = vector<ossimPolygon>());
    void setGeometry(GeometryPtr geom){deleteGeometry();m_geometry=geom;}
-   geos::geom::GeometryFactory* geomFactory(){{return m_globalFactory.valid()?m_globalFactory->m_geomFactory:0;}}
    GeometryPtr m_geometry;
-   static ossimRefPtr<ossimGeometryFactoryWrapper> m_globalFactory; 
 };
-
-ossimRefPtr<ossimGeometryFactoryWrapper> OssimPolyArea2dPrivate::m_globalFactory;
 
 OssimPolyArea2dPrivate::OssimPolyArea2dPrivate(GeometryPtr geom)
 :m_geometry(geom)
@@ -70,10 +39,6 @@ OssimPolyArea2dPrivate::OssimPolyArea2dPrivate(GeometryPtr geom)
    
    {
       OpenThreads::ScopedLock<OpenThreads::Mutex> lock(globalFactoryMutex);
-      if(!m_globalFactory.valid())
-      {
-         m_globalFactory = new ossimGeometryFactoryWrapper();
-      }    
    }
 }
 
@@ -82,70 +47,86 @@ OssimPolyArea2dPrivate::~OssimPolyArea2dPrivate()
    deleteGeometry();
 }
 
+GEOSGeometry *
+OssimPolyArea2dPrivate::ringToGeos(const ossimPolygon& ring)
+{
+   const std::vector<ossimDpt>& pts = ring.getVertexList();
+
+   int idx = 0;
+   int n = (int)pts.size();
+
+   GEOSCoordSequence *cas = 0;
+
+   if(n > 0)
+   {
+      bool toBeClosed = false;
+
+      if((pts[0].x != pts[n-1].x) || (pts[0].y!=pts[n-1].y))
+      {
+        toBeClosed = true;
+        cas = GEOSCoordSeq_create(n+1, 2)
+      }
+      else
+      {
+        cas = GEOSCoordSeq_create(n, 2)
+      }
+   
+      //fill the exterior ring
+      for (idx = 0; idx < n; idx++)
+      {
+        GEOSCoordSeq_setX(cas, idx, pts[idx].x);
+        GEOSCoordSeq_setY(cas, idx, pts[idx].y);
+      }
+      
+      //if the original polygon didn't have the first and last point the same, make it so
+      if( toBeClosed )
+      {
+         GEOSCoordSeq_setX(cas, idx, pts[0].x);
+         GEOSCoordSeq_setY(cas, idx, pts[0].y);
+      }
+   }
+
+   if ( cas )
+   {
+      return GEOSGeom_createLinearRing(cas);
+   }
+   return 0;
+}
+
 void OssimPolyArea2dPrivate::setGeometry(
    const ossimPolygon& exteriorRing, const vector<ossimPolygon>& interiorRings)
 {
    deleteGeometry();
    
-   geos::geom::CoordinateArraySequence *cas = new geos::geom::CoordinateArraySequence();
-   
-   const std::vector<ossimDpt>& pts = exteriorRing.getVertexList();
-
-   int idx = 0;
-   int n = (int)pts.size();
-   
-   if(n > 0)
+   GEOSGeometry *shell = ringToGeos(exteriorRing);
+   if ( ! shell )
    {
-      //fill the exterior ring
-      for (idx = 0; idx < n; idx++)
+      // TODO: handle exception
+   }
+
+   //fill the interior rings
+   GEOSGeometry *holes[interiorRings.size()];
+   unsigned int nholes = interiorRings.size();
+
+   //vector<GEOSGeometry*> *holes = new vector<GEOSGeometry*>();
+   for (unsigned int i = 0; i < nholes; ++i)
+   {
+      holes[i] = ringToGeos(interiorRings[i]);
+      if ( ! holes[i] )
       {
-         cas->add(geos::geom::Coordinate(pts[idx].x, pts[idx].y));
+         // TODO: handle exception
       }
+   }
       
-      //if the original polygon didn't have the first and last point the same, make it so
-      if((pts[0].x != pts[n-1].x) || (pts[0].y!=pts[n-1].y))
-      {
-         cas->add(geos::geom::Coordinate(pts[0].x, pts[0].y));
-      }
-      
-      //fill the interior rings
-      vector<geos::geom::Geometry*> *holes = new vector<geos::geom::Geometry*>();
-      for (ossim_uint32 interiorRingIdx = 0; interiorRingIdx < interiorRings.size(); ++interiorRingIdx)
-      {
-         geos::geom::CoordinateArraySequence *interiorCas =
-            new geos::geom::CoordinateArraySequence();
-         const std::vector<ossimDpt>& vertexPts = interiorRings[interiorRingIdx].getVertexList();
-         for(ossim_uint32 vertexIndex=0; vertexIndex < vertexPts.size(); ++vertexIndex)
-         {
-            interiorCas->add(geos::geom::Coordinate(vertexPts[vertexIndex].x,
-                                                    vertexPts[vertexIndex].y));
-         }
-         
-         //if the original polygon didn't have the first and last point the same, make it so
-         if((vertexPts[0].x != vertexPts[vertexPts.size()-1].x) ||
-            (vertexPts[0].y!=vertexPts[vertexPts.size()-1].y))
-         {
-            interiorCas->add(geos::geom::Coordinate(vertexPts[0].x, vertexPts[0].y));
-         }
-         
-         geos::geom::LinearRing *hole = geomFactory()->createLinearRing(interiorCas);
-         holes->push_back(hole);
-      }
-      
-      geos::geom::LinearRing* shell = geomFactory()->createLinearRing(cas);
-      if ( shell )
-      {
-         m_geometry = geomFactory()->createPolygon(shell, holes);
-      }
-      else
-      {
-         m_geometry = 0;
-      }
+   m_geometry = GEOSGeom_createPolygon(shell, holes, nholes);
+   if ( ! m_geometry )
+   {
+      // TODO: handle exception
    }
 }
 
 void ossimPolyArea2d::recurseVisibleGeometries(
-   std::vector<ossimPolygon>& polyList, const geos::geom::Geometry* geom) const
+   std::vector<ossimPolygon>& polyList, const GEOSGeometry* geom) const
 {
    int nGeoms = (int)geom->getNumGeometries();
    
@@ -182,7 +163,7 @@ void ossimPolyArea2d::recurseVisibleGeometries(
 }
 
 void ossimPolyArea2d::recurseHoles(std::vector<ossimPolygon>& polyList,
-                                   const geos::geom::Geometry* geom) const
+                                   const GEOSGeometry* geom) const
 {
    int nGeoms = (int)geom->getNumGeometries();
    
@@ -227,7 +208,7 @@ void ossimPolyArea2d::recurseHoles(std::vector<ossimPolygon>& polyList,
 }
 
 void ossimPolyArea2d::recurseCompleteGeometries(std::vector<ossimPolyArea2d>& polyList,
-                                                const geos::geom::Geometry* geom) const
+                                                const GEOSGeometry* geom) const
 {
    int nGeoms = (int)geom->getNumGeometries();
    if(nGeoms < 2 )
@@ -566,7 +547,7 @@ const ossimPolyArea2d& ossimPolyArea2d::operator -=(const ossimPolyArea2d& rhs)
 
 void ossimPolyArea2d::add(const ossimPolyArea2d& rhs)
 {
-   geos::geom::Geometry* geom = m_privateData->m_geometry->Union(rhs.m_privateData->m_geometry);
+   GEOSGeometry* geom = m_privateData->m_geometry->Union(rhs.m_privateData->m_geometry);
    if(geom) m_privateData->setGeometry(geom);
 }
 
@@ -669,7 +650,7 @@ bool ossimPolyArea2d::isPointWithin(double x, double y)const
    if(!isEmpty())
    {
       geos::geom::Coordinate c(x,y);
-      geos::geom::Geometry* geom = m_privateData->geomFactory()->createPoint(c);
+      GEOSGeometry* geom = m_privateData->geomFactory()->createPoint(c);
   
       result = m_privateData->m_geometry->intersects(geom);
 
@@ -745,7 +726,7 @@ ossimPolyArea2d& ossimPolyArea2d::toMultiPolygon()
          {
             case geos::geom::GEOS_POLYGON:
             {
-               std::vector<geos::geom::Geometry*> values;
+               std::vector<GEOSGeometry*> values;
                values.push_back(m_privateData->m_geometry->clone());
 
                m_privateData->setGeometry(m_privateData->m_geometry->getFactory()->createMultiPolygon(values));

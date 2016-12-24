@@ -133,17 +133,17 @@ protected:
    
    void clearPolygons();
    void recurseVisibleGeometries(ossimPolygon::Vector& polyList,
-                                 const geos::geom::Geometry* geom) const;
+                                 const GEOSGeometry* geom) const;
    
    void recurseHoles(ossimPolygon::Vector& polyList,
-                     const geos::geom::Geometry* geom) const;
+                     const GEOSGeometry* geom) const;
    
    /**
     * @brief Recurses over the Geometry object to load all complete polygons
     * (a shell and any internal holes) into the ossimPolyArea2d.
     */
    void recurseCompleteGeometries(std::vector<ossimPolyArea2d>& polyList,
-                                  const geos::geom::Geometry* geom) const;
+                                  const GEOSGeometry* geom) const;
    
    OssimPolyArea2dPrivate* m_privateData;
 };
